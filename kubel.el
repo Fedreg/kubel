@@ -21,7 +21,8 @@
 ;; Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
 ;; USA
 
-;; Version: 1.0
+;; Package-Version: 20251009.310
+;; Package-Revision: 48a2dabac249
 ;; Author: Adrien Brochard
 ;; Keywords: kubernetes k8s tools processes
 ;; URL: https://github.com/abrochard/kubel
@@ -225,7 +226,6 @@
   "Default number of lines to tail."
   :type 'integer
   :group 'kubel)
-
 (defcustom kubel-list-wide nil
   "Control whether list views show additional colums.
 
@@ -268,6 +268,13 @@ This is used by `kubel-kill-buffer'."
   :type 'boolean
   :group 'kubel)
 
+(defcustom kubel-use-messages-buffer nil
+  "Non-nil means process output goes to *Messages* instead of new buffers.
+When enabled, commands like delete will not pop up a new buffer but instead
+report their status via `message' to the echo area and *Messages* buffer."
+  :type 'boolean
+  :group 'kubel)
+
 (defcustom kubel-default-namespace "default"
   "Default namespace for kubel to use. Change if you have no resources in
 `default' namespace."
@@ -300,7 +307,11 @@ CMD is the command string to run."
   (kubel--log-command "kubectl-command" cmd)
   (with-output-to-string
     (with-current-buffer standard-output
-      (shell-command cmd t "*kubel stderr*"))))
+      (if kubel-use-messages-buffer
+          (save-window-excursion
+            (let ((inhibit-read-only t))
+              (shell-command cmd t "*Messages*")))
+        (shell-command cmd t "*kubel stderr*")))))
 
 (defvar-local kubel-namespace kubel-default-namespace
   "Current namespace.")
@@ -511,7 +522,11 @@ CALLBACK is called when process completes successfully.
           (exit-status (process-exit-status process)))
       (kubel--append-to-process-buffer (format "[%s]\nexit-code: %s" process-name exit-status))
       (if (eq 0 exit-status)
-          (when callback (funcall callback))
+          (progn
+            (when kubel-use-messages-buffer
+              (message "%s" (with-current-buffer (process-buffer process)
+                              (string-trim (buffer-string)))))
+            (when callback (funcall callback)))
         (let ((err (with-current-buffer (kubel--process-error-buffer process-name)
                      (buffer-string))))
           (kubel--append-to-process-buffer (format "error: %s" err))
@@ -540,10 +555,11 @@ READONLY If true buffer will be in readonly mode(view-mode)."
                   :file-handler t
                   :stderr (get-buffer-create error-buffer)
                   :command cmd)
-    (pop-to-buffer buffer-name)
-    (if readonly
-        (with-current-buffer buffer-name
-          (view-mode)))))
+    (unless kubel-use-messages-buffer
+      (pop-to-buffer buffer-name)
+      (if readonly
+          (with-current-buffer buffer-name
+            (view-mode))))))
 
 (defun kubel--get-resource-under-cursor ()
   "Utility function to get the name of the resource under the cursor.
