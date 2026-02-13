@@ -225,7 +225,6 @@
   "Default number of lines to tail."
   :type 'integer
   :group 'kubel)
-
 (defcustom kubel-list-wide nil
   "Control whether list views show additional colums.
 
@@ -268,6 +267,13 @@ This is used by `kubel-kill-buffer'."
   :type 'boolean
   :group 'kubel)
 
+(defcustom kubel-use-messages-buffer nil
+  "Non-nil means process output goes to *Messages* instead of new buffers.
+When enabled, commands like delete will not pop up a new buffer but instead
+report their status via `message' to the echo area and *Messages* buffer."
+  :type 'boolean
+  :group 'kubel)
+
 (defcustom kubel-default-namespace "default"
   "Default namespace for kubel to use. Change if you have no resources in
 `default' namespace."
@@ -300,7 +306,11 @@ CMD is the command string to run."
   (kubel--log-command "kubectl-command" cmd)
   (with-output-to-string
     (with-current-buffer standard-output
-      (shell-command cmd t "*kubel stderr*"))))
+      (if kubel-use-messages-buffer
+          (save-window-excursion
+            (let ((inhibit-read-only t))
+              (shell-command cmd t "*Messages*")))
+        (shell-command cmd t "*kubel stderr*")))))
 
 (defvar-local kubel-namespace kubel-default-namespace
   "Current namespace.")
@@ -501,29 +511,35 @@ NAME is the buffer name."
   "Return the error buffer name for the PROCESS-NAME."
   (format "*%s:err*" process-name))
 
-(defun kubel--sentinel (callback)
+(defun kubel--sentinel (callback suppress-buffer)
   "Sentinel function used by KUBEL--EXEC.
 
 CALLBACK is called when process completes successfully.
+SUPPRESS-BUFFER when non-nil, output goes to *Messages* instead of a buffer.
 "
   (lambda (process event)
     (let ((process-name (process-name process))
           (exit-status (process-exit-status process)))
       (kubel--append-to-process-buffer (format "[%s]\nexit-code: %s" process-name exit-status))
       (if (eq 0 exit-status)
-          (when callback (funcall callback))
+          (progn
+            (when (and kubel-use-messages-buffer suppress-buffer)
+              (message "%s" (with-current-buffer (process-buffer process)
+                              (string-trim (buffer-string)))))
+            (when callback (funcall callback)))
         (let ((err (with-current-buffer (kubel--process-error-buffer process-name)
                      (buffer-string))))
           (kubel--append-to-process-buffer (format "error: %s" err))
           (error (format "Kubel process %s error: %s" process-name err)))))))
 
-(defun kubel--exec (process-name args &optional readonly callback)
+(defun kubel--exec (process-name args &optional readonly callback suppress-buffer)
   "Utility function to run commands in the proper context and namespace.
 
 PROCESS-NAME is an identifier for the process.  Default to \"kubel-command\".
 ARGS is a ist of arguments.
 CALLBACK is a function that will be executed when the command completes.
-READONLY If true buffer will be in readonly mode(view-mode)."
+READONLY If true buffer will be in readonly mode(view-mode).
+SUPPRESS-BUFFER when non-nil, output goes to *Messages* instead of a buffer."
   (when (equal process-name "")
     (setq process-name "kubel-command"))
   (let ((buffer-name (format "*kubel-resource:%s:%s:%s*" kubel-context kubel-namespace (string-join args "_")))
@@ -536,14 +552,15 @@ READONLY If true buffer will be in readonly mode(view-mode)."
     (kubel--log-command process-name cmd)
     (make-process :name process-name
                   :buffer buffer-name
-                  :sentinel (kubel--sentinel callback)
+                  :sentinel (kubel--sentinel callback suppress-buffer)
                   :file-handler t
                   :stderr (get-buffer-create error-buffer)
                   :command cmd)
-    (pop-to-buffer buffer-name)
-    (if readonly
-        (with-current-buffer buffer-name
-          (view-mode)))))
+    (unless (and kubel-use-messages-buffer suppress-buffer)
+      (pop-to-buffer buffer-name)
+      (if readonly
+          (with-current-buffer buffer-name
+            (view-mode))))))
 
 (defun kubel--get-resource-under-cursor ()
   "Utility function to get the name of the resource under the cursor.
@@ -1092,7 +1109,7 @@ the variables `kubel-namespace' and `kubel-context', respectively."
            (args (list "delete" kubel-resource pod)))
       (when (transient-args 'kubel-delete-popup)
         (setq args (append args (list "--force" "--grace-period=0"))))
-      (kubel--exec process-name args))))
+      (kubel--exec process-name args nil nil t))))
 
 (defun kubel-jab-deployment ()
   "Make a trivial patch to force a new deployment.
